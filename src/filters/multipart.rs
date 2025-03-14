@@ -1,6 +1,6 @@
 //! Multipart body filters
 //!
-//! Filters that extract a multipart body for a route.
+//! [`Filter`](crate::Filter)s that extract a multipart body for a route.
 
 use std::error::Error as StdError;
 use std::fmt::{Display, Formatter};
@@ -22,12 +22,12 @@ use crate::reject::{self, Rejection};
 // If not otherwise configured, default to 2MB.
 const DEFAULT_FORM_DATA_MAX_LENGTH: u64 = 1024 * 1024 * 2;
 
-/// A `Filter` to extract a `multipart/form-data` body from a request.
+/// A [`Filter`](crate::Filter) to extract a `multipart/form-data` body from a request.
 ///
 /// Create with the `warp::multipart::form()` function.
 #[derive(Debug, Clone)]
 pub struct FormOptions {
-    max_length: u64,
+    max_length: Option<u64>,
 }
 
 /// A `Stream` of multipart/form-data `Part`s.
@@ -44,13 +44,13 @@ pub struct Part {
     part: PartInner<'static>,
 }
 
-/// Create a `Filter` to extract a `multipart/form-data` body from a request.
+/// Create a [`Filter`](crate::Filter) to extract a `multipart/form-data` body from a request.
 ///
 /// The extracted `FormData` type is a `Stream` of `Part`s, and each `Part`
 /// in turn is a `Stream` of bytes.
 pub fn form() -> FormOptions {
     FormOptions {
-        max_length: DEFAULT_FORM_DATA_MAX_LENGTH,
+        max_length: Some(DEFAULT_FORM_DATA_MAX_LENGTH),
     }
 }
 
@@ -59,9 +59,10 @@ pub fn form() -> FormOptions {
 impl FormOptions {
     /// Set the maximum byte length allowed for this body.
     ///
+    /// `max_length(None)` means that maximum byte length is not checked.
     /// Defaults to 2MB.
-    pub fn max_length(mut self, max: u64) -> Self {
-        self.max_length = max;
+    pub fn max_length(mut self, max: impl Into<Option<u64>>) -> Self {
+        self.max_length = max.into();
         self
     }
 }
@@ -83,8 +84,7 @@ impl FilterBase for FormOptions {
             future::ready(mime)
         });
 
-        let filt = super::body::content_length_limit(self.max_length)
-            .and(boundary)
+        let filt = boundary
             .and(super::body::body())
             .map(|boundary: String, body| {
                 let body = BodyIoError(body);
@@ -93,9 +93,15 @@ impl FilterBase for FormOptions {
                 }
             });
 
-        let fut = filt.filter(Internal);
-
-        Box::pin(fut)
+        if let Some(max_length) = self.max_length {
+            Box::pin(
+                super::body::content_length_limit(max_length)
+                    .and(filt)
+                    .filter(Internal),
+            )
+        } else {
+            Box::pin(filt.filter(Internal))
+        }
     }
 }
 
@@ -114,7 +120,7 @@ impl Stream for FormData {
         match self.inner.poll_next_field(cx) {
             Poll::Pending => Poll::Pending,
             Poll::Ready(Ok(Some(part))) => {
-                if part.name().is_some() {
+                if part.name().is_some() || part.file_name().is_some() {
                     Poll::Ready(Some(Ok(Part { part })))
                 } else {
                     Poll::Ready(Some(Err(crate::Error::new(MultipartFieldMissingName))))
@@ -131,7 +137,9 @@ impl Stream for FormData {
 impl Part {
     /// Get the name of this part.
     pub fn name(&self) -> &str {
-        self.part.name().expect("checked for name previously")
+        self.part
+            .name()
+            .unwrap_or_else(|| self.part.file_name().expect("checked for name previously"))
     }
 
     /// Get the filename of this part, if present.
@@ -142,7 +150,7 @@ impl Part {
     /// Get the content-type of this part, if present.
     pub fn content_type(&self) -> Option<&str> {
         let content_type = self.part.content_type();
-        content_type.map(|t| t.type_().as_str())
+        content_type.map(|t| t.as_ref())
     }
 
     /// Asynchronously get some of the data for this `Part`.
@@ -168,7 +176,7 @@ impl Part {
 impl fmt::Debug for Part {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let mut builder = f.debug_struct("Part");
-        builder.field("name", &self.part.name());
+        builder.field("name", &self.name());
 
         if let Some(ref filename) = self.part.file_name() {
             builder.field("filename", filename);
