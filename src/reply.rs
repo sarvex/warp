@@ -8,7 +8,6 @@
 //! Besides them, you can return a type that implements [`Reply`](./trait.Reply.html). This
 //! could be any of the following:
 //!
-//! - [`http::Response<impl Into<hyper::Body>>`](https://docs.rs/http)
 //! - `String`
 //! - `&'static str`
 //! - `http::StatusCode`
@@ -36,20 +35,20 @@
 use std::borrow::Cow;
 use std::convert::TryFrom;
 
-use crate::generic::{Either, One};
 use http::header::{HeaderName, HeaderValue, CONTENT_TYPE};
 use http::StatusCode;
-use hyper::Body;
 use serde::Serialize;
 
 // This re-export just looks weird in docs...
 pub(crate) use self::sealed::Reply_;
 use self::sealed::{BoxedReply, Internal};
+use crate::bodyt::Body;
 #[doc(hidden)]
 pub use crate::filters::reply as with;
+use crate::generic::{Either, One};
 
 /// Response type into which types implementing the `Reply` trait are convertable.
-pub type Response = ::http::Response<Body>;
+pub type Response = ::http::Response<crate::bodyt::Body>;
 
 /// Returns an empty `Reply` with status code `200 OK`.
 ///
@@ -128,6 +127,29 @@ impl Reply for Json {
     }
 }
 
+/// Converts a [`Stream`](futures_util::Stream) of data chunks into a reply.
+///
+/// # Example
+///
+/// ```
+/// use warp::Filter;
+/// use futures_util::stream;
+/// use bytes::Bytes;
+///
+/// let route = warp::any().map(|| {
+///     let chunks = vec![Ok::<_, std::io::Error>(Bytes::from("hello"))];
+///     warp::reply::stream(stream::iter(chunks))
+/// });
+/// ```
+pub fn stream<S, B, E>(stream: S) -> impl Reply
+where
+    S: futures_util::Stream<Item = Result<B, E>> + Send + Sync + 'static,
+    B: Into<bytes::Bytes>,
+    E: Into<Box<dyn std::error::Error + Send + Sync>> + Send + 'static,
+{
+    Response::new(Body::wrap_stream(stream))
+}
+
 /// Reply with a body and `content-type` set to `text/html; charset=utf-8`.
 ///
 /// # Example
@@ -153,7 +175,7 @@ impl Reply for Json {
 /// ```
 pub fn html<T>(body: T) -> Html<T>
 where
-    Body: From<T>,
+    crate::bodyt::Body: From<T>,
     T: Send,
 {
     Html { body }
@@ -167,7 +189,7 @@ pub struct Html<T> {
 
 impl<T> Reply for Html<T>
 where
-    Body: From<T>,
+    crate::bodyt::Body: From<T>,
     T: Send,
 {
     #[inline]
@@ -380,7 +402,7 @@ impl<T: Reply> Reply for WithHeader<T> {
 
 impl<T: Send> Reply for ::http::Response<T>
 where
-    Body: From<T>,
+    crate::bodyt::Body: From<T>,
 {
     #[inline]
     fn into_response(self) -> Response {
@@ -473,7 +495,7 @@ impl Reply for &'static [u8] {
                 CONTENT_TYPE,
                 HeaderValue::from_static("application/octet-stream"),
             )
-            .body(Body::from(self))
+            .body(Body::from(bytes::Bytes::from_static(self)))
             .unwrap()
     }
 }
